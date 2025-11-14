@@ -1,14 +1,28 @@
+#!/usr/bin/env python
+#from setuptools import setup
+
+#setup(name='gym_fraud',
+#      version='0.0.1',
+#      install_requires=['gym']
+#)
+
+
+#!/usr/bin/env python
 from setuptools import setup, find_packages
 
 setup(
     name="gym_fraud",
-    version="0.0.1",
-    packages=find_packages(include=["gym_fraud", "gym_fraud.*"]),
+    version="0.0.2",
+    description="Fraud detection RL environment using Gymnasium",
+    packages=find_packages(),
     install_requires=[
-        "gymnasium>=0.29.1",
-        "numpy>=1.23.5",
-        "pandas>=1.5.3",
-        "scikit-learn>=1.2.2",
-        "matplotlib>=3.7.1"
+        "gymnasium>=0.29.0",
+        "pandas>=2.0.0",
+        "numpy>=1.24",
     ],
+    entry_points={
+        "gymnasium.envs": [
+            "FraudEnv = gym_fraud.envs.fraud_env:FraudEnv",
+        ],
+    },
 )
