@@ -1,0 +1,17 @@
+gymnasium==0.29.1
+pygame==2.5.2
+
+# Seu pacote local
+#gym_fraud @ file:./gym_fraud
+
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.4.2
+imbalanced-learn==0.12.3
+
+torch==2.3.0
+# tensorflow==2.16.1   # opcional — remova o "#" se quiser instalar
+
+matplotlib==3.8.4
+seaborn==0.13.2
+tqdm==4.66.4
