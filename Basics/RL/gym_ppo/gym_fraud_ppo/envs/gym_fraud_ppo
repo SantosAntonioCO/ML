@@ -1,0 +1,29 @@
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+import pandas as pd
+
+class CreditCardFraudEnv(gym.Env):
+    def __init__(self):
+        super().__init__()
+        data = pd.read_csv("creditcard.csv")
+        self.data = data.drop(columns=["Time", "Amount"])
+        self.labels = data["Class"].values
+        self.current_step = 0
+        self.observation_space = spaces.Box(low=0, high=1, shape=(self.data.shape[1],), dtype=np.float32)
+        self.action_space = spaces.Discrete(2)
+
+    def reset(self, seed=None, options=None):
+        self.current_step = 0
+        return self.data.iloc[self.current_step].values, {}
+
+    def step(self, action):
+        label = self.labels[self.current_step]
+        reward = 1 if action == label else -1
+        self.current_step += 1
+        terminated = self.current_step >= len(self.data)
+        obs = self.data.iloc[self.current_step].values if not terminated else np.zeros(self.data.shape[1])
+        return obs, reward, terminated, False, {}
+
+    def render(self):
+        pass
