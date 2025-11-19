@@ -1,0 +1,24 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="gym_fraud_ppo",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "gymnasium>=0.29.1",
+        "torch>=2.0.0",
+        "numpy>=1.23.0",
+        "pandas>=1.5.0",
+        "matplotlib>=3.7.0",
+        "scikit-learn>=1.3.0"
+    ],
+    description="Ambiente personalizado para detecção de fraude com PPO usando Gymnasium e PyTorch",
+    author="Antonio",
+    license="MIT",
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+    ],
+    python_requires=">=3.8",
+)
