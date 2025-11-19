@@ -1,0 +1,13 @@
+#"\gym_fraud_rl\gym_fraud_rl\gym_fraud_rl\__init__.py"
+#import logging
+#from gym.envs.registration import register
+# Pacote gym_fraud
+#from . import envs
+
+#register(
+#    id='fraud-v0',
+#    entry_point='gym_fraud.envs:FraudEnv',
+#)
+
+#from gym_fraud_ppo.envs.gym_fraud_ppo import CreditCardFraudEnv 
+from gym_fraud_rl.envs.gym_fraud_rl import FraudEnv
