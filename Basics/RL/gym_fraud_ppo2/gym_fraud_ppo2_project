@@ -1,0 +1,533 @@
+# gym_fraud_ppo — Project files
+
+Abaixo estão os arquivos do pacote `gym_fraud_ppo` e scripts auxiliares. Copie cada bloco para o arquivo indicado (mesmo path). O projeto inclui:
+
+- `train_ppo.py
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import recall_score
+import matplotlib.pyplot as plt
+from gym_fraud_ppo.envs.gym_fraud_ppo import CreditCardFraudEnv
+from ppo import PPO
+
+
+def load_data(train_file="creditcard.csv"):
+    df = pd.read_csv(train_file)
+    X = df.drop("Class", axis=1).values
+    y = df["Class"].values
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+    return X, y, scaler
+
+
+def evaluate_policy(env, policy, episodes=5):
+    recalls = []
+    frrs = []
+
+    for _ in range(episodes):
+        obs, _ = env.reset()
+        done = False
+        preds = []
+        labels = []
+
+        while not done:
+            obs_t = torch.tensor(obs, dtype=torch.float32)
+            action, _ = policy.act(obs_t)
+            obs, reward, done, _, _ = env.step(action)
+            preds.append(action)
+            labels.append(env.labels[env.current_step - 1])
+
+        labels = np.array(labels)
+        preds = np.array(preds)
+        recall = recall_score(labels, preds, zero_division=0)
+        tn = np.sum((labels == 0) & (preds == 0))
+        fn = np.sum((labels == 1) & (preds == 0))
+        frr = fn / (fn + tn + 1e-9)
+
+        recalls.append(recall)
+        frrs.append(frr)
+
+    return np.mean(recalls), np.mean(frrs)
+
+
+def train_ppo(train_file="creditcard.csv", max_episodes=200):
+    X, y, scaler = load_data(train_file)
+    env = CreditCardFraudEnv(X, y)
+
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+
+    agent = PPO(obs_dim, act_dim)
+
+    rewards_hist = []
+    recall_hist = []
+    frr_hist = []
+
+    for ep in range(max_episodes):
+        obs, _ = env.reset()
+        done = False
+        ep_reward = 0
+
+        while not done:
+            obs_t = torch.tensor(obs, dtype=torch.float32)
+            action, logp = agent.policy.act(obs_t)
+            obs, reward, done, _, _ = env.step(action)
+            agent.buffer.store(obs_t, action, reward, logp)
+            ep_reward += reward
+
+        agent.update()
+
+        recall, frr = evaluate_policy(env, agent.policy, episodes=3)
+
+        rewards_hist.append(ep_reward)
+        recall_hist.append(recall)
+        frr_hist.append(frr)
+
+        print(f"Episode {ep+1}/{max_episodes} | Reward={ep_reward:.1f} | Recall={recall:.3f} | FRR={frr:.3f}")
+
+    # Plots
+    plt.figure(figsize=(10, 6))
+    plt.plot(rewards_hist, label="Reward")
+    plt.plot(recall_hist, label="Recall")
+    plt.plot(frr_hist, label="FRR")
+    plt.legend()
+    plt.xlabel("Episode")
+    plt.ylabel("Metric Value")
+    plt.title("PPO Training Metrics")
+    plt.show()
+
+
+if __name__ == "__main__":
+    train_ppo()
+```python
+from setuptools import setup, find_packages
+
+setup(
+    name='gym_fraud_ppo',
+    version='0.1.0',
+    description='Gym environment and PPO scripts for credit card fraud detection',
+    packages=find_packages(),
+    include_package_data=True,
+    install_requires=[
+        'torch>=2.0',
+        'gymnasium>=0.29',
+        'numpy',
+        'pandas',
+        'scikit-learn',
+        'matplotlib'
+    ],
+)
+```
+
+---
+
+## `gym_fraud_ppo/__init__.py`
+```python
+# package init for gym_fraud_ppo
+__version__ = '0.1.0'
+```
+
+---
+
+## `gym_fraud_ppo/envs/__init__.py`
+```python
+from gymnasium.envs.registration import register
+
+register(
+    id='CreditCardFraud-v0',
+    entry_point='gym_fraud_ppo.envs.gym_fraud_ppo:CreditCardFraudEnv',
+)
+```
+
+---
+
+## `gym_fraud_ppo/envs/gym_fraud_ppo.py`
+```python
+"""
+Ambiente Gymnasium simples para detecção de fraude usando séries de transações.
+Espera-se um CSV de treino com colunas: features... , Class (0/1)
+O ambiente retorna observação (features normalizadas) e recompensa:
+- +1 para detectar fraude corretamente (action=1 e label=1)
+- -1 para falso negativo
+- -0.1 para acerto negativo (evitar comportamento trivial)
+- etc. Ajuste conforme necessário.
+
+Compatível com Gymnasium API.
+"""
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+import pandas as pd
+
+class CreditCardFraudEnv(gym.Env):
+    metadata = {"render.modes": ["human"]}
+
+    def __init__(self, csv_path=None, max_steps=None, normalize=True):
+        super().__init__()
+        # csv_path: se None, usuário deve preencher env.data e env.labels manualmente
+        self.csv_path = csv_path
+        if csv_path is not None:
+            self._load_csv(csv_path)
+
+        self.current_step = 0
+        self.normalize = normalize
+        self.max_steps = max_steps
+
+        # observation and action spaces set after load or user must set them
+        if hasattr(self, 'data'):
+            obs_dim = self.data.shape[1]
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+            self.action_space = spaces.Discrete(2)  # 0 = non-fraud, 1 = fraud
+        else:
+            # defaults until data loaded
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32)
+            self.action_space = spaces.Discrete(2)
+
+    def _load_csv(self, path):
+        df = pd.read_csv(path)
+        if 'Class' not in df.columns:
+            raise ValueError("CSV must contain 'Class' column with 0/1 labels")
+        labels = df['Class'].values.astype(int)
+        features = df.drop(columns=['Class']).values.astype(np.float32)
+
+        # simple standardization
+        mean = features.mean(axis=0, keepdims=True)
+        std = features.std(axis=0, keepdims=True) + 1e-8
+        self.data = (features - mean) / std
+        self.labels = labels
+
+    def reset(self, seed=None, options=None):
+        self.current_step = 0
+        if self.max_steps is None:
+            self.max_steps = len(self.data)
+        obs = self.data[self.current_step]
+        return obs, {}
+
+    def step(self, action):
+        label = int(self.labels[self.current_step])
+        # reward design (tunable)
+        if action == 1 and label == 1:
+            reward = 1.0  # true positive
+        elif action == 0 and label == 1:
+            reward = -1.0  # false negative
+        elif action == 1 and label == 0:
+            reward = -0.5  # false positive
+        else:
+            reward = 0.1  # true negative (small positive to encourage correct non-fraud)
+
+        self.current_step += 1
+        done = self.current_step >= self.max_steps
+        obs = self.data[self.current_step-1] if not done else np.zeros_like(self.data[0])
+        info = {"label": label, "current_step": self.current_step}
+        return obs, reward, done, False, info
+
+    def seed(self, seed=None):
+        np.random.seed(seed)
+
+    def render(self, mode='human'):
+        pass
+
+    def close(self):
+        pass
+```
+
+---
+
+## `ppo.py` (agente PPO — Actor-Critic, mínimo funcional)
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions import Categorical
+import numpy as np
+
+class ActorCritic(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden_size=64):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(obs_dim, hidden_size),
+            nn.ReLU()
+        )
+        self.policy_head = nn.Linear(hidden_size, act_dim)
+        self.value_head = nn.Linear(hidden_size, 1)
+
+    def forward(self, x):
+        x = self.shared(x)
+        logits = self.policy_head(x)
+        probs = torch.softmax(logits, dim=-1)
+        value = self.value_head(x)
+        return probs, value.squeeze(-1)
+
+class PPOAgent:
+    def __init__(self, obs_dim, act_dim, lr=3e-4, gamma=0.99, eps_clip=0.2, K_epochs=4, vf_coef=0.5, ent_coef=0.01):
+        self.model = ActorCritic(obs_dim, act_dim)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.gamma = gamma
+        self.eps_clip = eps_clip
+        self.K_epochs = K_epochs
+        self.vf_coef = vf_coef
+        self.ent_coef = ent_coef
+
+    def select_action(self, obs):
+        obs_t = torch.tensor(obs, dtype=torch.float32)
+        probs, value = self.model(obs_t)
+        dist = Categorical(probs)
+        action = dist.sample()
+        return action.item(), dist.log_prob(action).detach(), value.detach(), dist.entropy().detach()
+
+    def evaluate_actions(self, obs_batch, action_batch):
+        probs, values = self.model(obs_batch)
+        dist = Categorical(probs)
+        log_probs = dist.log_prob(action_batch)
+        entropy = dist.entropy()
+        return log_probs, values, entropy
+
+    def update(self, trajectories):
+        # trajectories: dict with keys: obs, actions, log_probs_old, returns, advantages
+        obs = torch.tensor(np.array(trajectories['obs']), dtype=torch.float32)
+        actions = torch.tensor(trajectories['actions'], dtype=torch.int64)
+        old_log_probs = torch.tensor(trajectories['log_probs'], dtype=torch.float32)
+        returns = torch.tensor(trajectories['returns'], dtype=torch.float32)
+        advantages = torch.tensor(trajectories['advantages'], dtype=torch.float32)
+
+        for _ in range(self.K_epochs):
+            log_probs, values, entropy = self.evaluate_actions(obs, actions)
+            ratio = torch.exp(log_probs - old_log_probs)
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            critic_loss = nn.MSELoss()(values, returns)
+            entropy_loss = entropy.mean()
+
+            loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy_loss
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+```
+
+---
+
+## `utils.py`
+```python
+import numpy as np
+from sklearn.metrics import recall_score, f1_score, accuracy_score, confusion_matrix
+
+
+def compute_returns(rewards, gamma=0.99):
+    R = 0
+    returns = []
+    for r in reversed(rewards):
+        R = r + gamma * R
+        returns.insert(0, R)
+    return np.array(returns, dtype=np.float32)
+
+
+def compute_advantages(returns, values):
+    # generalized advantage baselines could be used; simple advantage = returns - values
+    return returns - values
+
+
+def frr_score(y_true, y_pred):
+    # FRR = FN / (FN + TN)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0,1]).ravel()
+    denom = fn + tn
+    return fn / denom if denom > 0 else 0.0
+```
+
+---
+
+## `train_ppo.py`
+```python
+"""
+Treino PPO com arquivo de treino (train.csv). Salva modelo e plota reward, recall e FRR por episódio.
+Uso:
+    python train_ppo.py --train_csv train.csv --save_path models/ppo.pt
+
+"""
+import argparse
+import os
+import numpy as np
+import torch
+from ppo import PPOAgent
+from gym_fraud_ppo.envs.gym_fraud_ppo import CreditCardFraudEnv
+from utils import compute_returns, compute_advantages, recall_score, f1_score, accuracy_score, frr_score
+import matplotlib.pyplot as plt
+
+# pequenas compatibilidades
+from sklearn.metrics import recall_score as _recall, f1_score as _f1, accuracy_score as _acc
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_csv', type=str, required=True)
+    parser.add_argument('--save_path', type=str, default='models/ppo.pt')
+    parser.add_argument('--num_episodes', type=int, default=200)
+    parser.add_argument('--max_steps', type=int, default=None)
+    args = parser.parse_args()
+
+    env = CreditCardFraudEnv(csv_path=args.train_csv, max_steps=args.max_steps)
+    obs_dim = env.data.shape[1]
+    act_dim = 2
+
+    agent = PPOAgent(obs_dim, act_dim)
+
+    os.makedirs(os.path.dirname(args.save_path) or '.', exist_ok=True)
+
+    rewards_history = []
+    recall_history = []
+    f1_history = []
+    accuracy_history = []
+    frr_history = []
+
+    for ep in range(args.num_episodes):
+        obs, _ = env.reset()
+        done = False
+
+        ep_rewards = []
+        obs_batch = []
+        actions = []
+        log_probs_old = []
+        values = []
+        labels = []
+
+        while not done:
+            action, log_prob, value, _ = agent.select_action(obs)
+            next_obs, reward, done, _, info = env.step(action)
+
+            obs_batch.append(obs)
+            actions.append(action)
+            log_probs_old.append(log_prob.item())
+            values.append(value.item())
+            ep_rewards.append(reward)
+            labels.append(info['label'])
+
+            obs = next_obs
+
+        returns = compute_returns(ep_rewards, gamma=agent.gamma)
+        returns_t = returns
+        values_arr = np.array(values, dtype=np.float32)
+        advantages = compute_advantages(returns_t, values_arr)
+
+        trajectories = {
+            'obs': obs_batch,
+            'actions': actions,
+            'log_probs': log_probs_old,
+            'returns': returns_t,
+            'advantages': advantages
+        }
+
+        agent.update(trajectories)
+
+        # metrics
+        preds = actions
+        recall = _recall(labels, preds, zero_division=0)
+        f1 = _f1(labels, preds, zero_division=0)
+        acc = _acc(labels, preds)
+        # FRR
+        from sklearn.metrics import confusion_matrix
+        tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0,1]).ravel()
+        frr = fn / (fn + tn) if (fn + tn) > 0 else 0.0
+
+        total_reward = sum(ep_rewards)
+        rewards_history.append(total_reward)
+        recall_history.append(recall)
+        f1_history.append(f1)
+        accuracy_history.append(acc)
+        frr_history.append(frr)
+
+        print(f"Episode {ep+1}/{args.num_episodes} - Reward {total_reward:.2f} - Recall {recall:.3f} - F1 {f1:.3f} - FRR {frr:.3f}")
+
+    # salvar modelo
+    torch.save(agent.model.state_dict(), args.save_path)
+
+    # plots
+    plt.figure(figsize=(10,6))
+    plt.plot(rewards_history, label='Reward')
+    plt.plot(recall_history, label='Recall')
+    plt.plot(frr_history, label='FRR')
+    plt.legend()
+    plt.xlabel('Episode')
+    plt.title('Training curves')
+    plt.grid(True)
+    plt.savefig('training_curves.png')
+    plt.show()
+```
+
+---
+
+## `test.py`
+```python
+"""
+Avalia modelo treinado em `teste.csv`.
+Uso:
+    python test.py --model models/ppo.pt --test_csv teste.csv
+"""
+import argparse
+import torch
+import numpy as np
+from gym_fraud_ppo.envs.gym_fraud_ppo import CreditCardFraudEnv
+from ppo import PPOAgent, ActorCritic
+from sklearn.metrics import recall_score, f1_score, accuracy_score, confusion_matrix
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, required=True)
+    parser.add_argument('--test_csv', type=str, required=True)
+    args = parser.parse_args()
+
+    env = CreditCardFraudEnv(csv_path=args.test_csv)
+    obs_dim = env.data.shape[1]
+    act_dim = 2
+
+    # carregar modelo
+    model = ActorCritic(obs_dim, act_dim)
+    model.load_state_dict(torch.load(args.model))
+    model.eval()
+
+    obs, _ = env.reset()
+    done = False
+    preds = []
+    labels = []
+
+    while not done:
+        obs_t = torch.tensor(obs, dtype=torch.float32)
+        probs, _ = model(obs_t)
+        action = torch.argmax(probs).item()
+        obs, _, done, _, info = env.step(action)
+        preds.append(action)
+        labels.append(info['label'])
+
+    recall = recall_score(labels, preds, zero_division=0)
+    f1 = f1_score(labels, preds, zero_division=0)
+    acc = accuracy_score(labels, preds)
+    tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0,1]).ravel()
+    frr = fn / (fn + tn) if (fn + tn) > 0 else 0.0
+
+    print(f"Test results — Recall: {recall:.4f}, F1: {f1:.4f}, Accuracy: {acc:.4f}, FRR: {frr:.4f}")
+```
+
+---
+
+### Observações / dicas
+- O reward shaping é essencial: os valores que escolhi são exemplares; ajuste para o trade-off que quiser (ex.: penalizar mais falsos negativos).
+- Para rodar localmente: instale o pacote com `pip install -e .` no diretório do `setup.py`.
+- Os scripts usam carregamento CSV com coluna `Class` como label — adapte se seu CSV tiver outro nome.
+- Este é um ponto de partida: para produção, adicione minibatching dos dados, normalizações persistentes (salvar mean/std), seed determinística, logging (TensorBoard) e early stopping.
+
+---
+
+Se quiser, eu posso:
+- gerar uma versão com minibatching e Buffer para coletar rollouts maiores;
+- adicionar checkpoint automático e avaliação validadora por X episódios;
+- adaptar as observações para incluir histórico (ex.: janelas temporais) ou usar replay buffer.
+
+Diga qual variação prefere e eu atualizo o projeto.
+
