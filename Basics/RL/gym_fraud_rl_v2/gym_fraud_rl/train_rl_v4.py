@@ -1,0 +1,213 @@
+import os
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import numpy as np
+from collections import deque
+from gym_fraud_rl.envs.gym_fraud_rl import FraudEnv
+from sklearn.metrics import recall_score, f1_score, accuracy_score
+
+# make dir
+os.makedirs("rl_results", exist_ok=True)
+
+# SEED
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+
+# ===============================================
+#  Load ENVS 
+# ===============================================
+env_train = FraudEnv("creditcard_train.csv")   # 
+env_val   = FraudEnv("creditcard_val.csv")     # 
+env_test  = FraudEnv("creditcard_test.csv")    # 
+
+env = env_train  # train only env_train
+print("Envs Loaded")
+
+
+# ===============================================
+#   Q-Net
+# ===============================================
+class DQN(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
+    def forward(self, x):
+        return self.fc(x)
+
+# Replay Memory
+class ReplayMemory:
+    def __init__(self, capacity):
+        self.memory = deque(maxlen=capacity)
+    def push(self, transition):
+        self.memory.append(transition)
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+    def __len__(self):
+        return len(self.memory)
+
+# train function
+def optimize_model(policy_net, target_net, memory, optimizer, batch_size, gamma):
+    if len(memory) < batch_size:
+        return
+    transitions = memory.sample(batch_size)
+    batch = list(zip(*transitions))
+
+    state_batch = torch.tensor(np.array(batch[0]), dtype=torch.float32)
+    action_batch = torch.tensor(batch[1], dtype=torch.int64).unsqueeze(1)
+    reward_batch = torch.tensor(batch[2], dtype=torch.float32)
+    next_state_batch = torch.tensor(np.array(batch[3]), dtype=torch.float32)
+    done_batch = torch.tensor(batch[4], dtype=torch.float32)
+
+    q_values = policy_net(state_batch).gather(1, action_batch).squeeze()
+    next_q_values = target_net(next_state_batch).max(1)[0]
+    expected_q_values = reward_batch + gamma * next_q_values * (1 - done_batch)
+
+    loss = nn.MSELoss()(q_values, expected_q_values.detach())
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# ===============================================
+# Setup
+# ===============================================
+n_actions = env_train.action_space.n
+state_dim = env_train.observation_space.shape[0]
+
+policy_net = DQN(state_dim, n_actions)
+target_net = DQN(state_dim, n_actions)
+target_net.load_state_dict(policy_net.state_dict())
+
+optimizer = optim.Adam(policy_net.parameters(), lr=1e-3)
+memory = ReplayMemory(10000)
+
+num_episodes = 50
+batch_size = 64
+gamma = 0.99
+eps_start = 0.9
+eps_end = 0.05
+eps_decay = 200
+
+all_rewards, all_recalls, all_f1s, all_accuracies, all_frrs = [], [], [], [], []
+
+steps_done = 0
+
+def select_action(state):
+    global steps_done
+    eps_threshold = eps_end + (eps_start - eps_end) * np.exp(-1. * steps_done / eps_decay)
+    steps_done += 1
+    if random.random() > eps_threshold:
+        with torch.no_grad():
+            return policy_net(torch.tensor(state, dtype=torch.float32)).argmax().item()
+    else:
+        return random.randrange(n_actions)
+
+print("Starting Training")
+
+# ===============================================
+# Training (train.csv)
+# ===============================================
+for episode in range(num_episodes):
+    print(episode, " of ", num_episodes)
+    obs, _ = env_train.reset()
+    done = False
+    rewards, actions, labels = [], [], []
+
+    while not done:
+        action = select_action(obs)
+        next_obs, reward, done, _, info = env_train.step(action)
+
+        memory.push((obs, action, reward, next_obs, done))
+        optimize_model(policy_net, target_net, memory, optimizer, batch_size, gamma)
+
+        obs = next_obs
+        rewards.append(reward)
+        actions.append(info["action"])
+        labels.append(info["label"])
+
+    target_net.load_state_dict(policy_net.state_dict())
+
+    # Epsode Metrics
+    total_reward = sum(rewards)
+    recall = recall_score(labels, actions, zero_division=0)
+    f1 = f1_score(labels, actions, zero_division=0)
+    accuracy = accuracy_score(labels, actions)
+    tn = sum((np.array(labels) == 0) & (np.array(actions) == 0))
+    fn = sum((np.array(labels) == 1) & (np.array(actions) == 0))
+    frr = fn / (fn + tn) if (fn + tn) > 0 else 0
+
+    all_rewards.append(total_reward)
+    all_recalls.append(recall)
+    all_f1s.append(f1)
+    all_accuracies.append(accuracy)
+    all_frrs.append(frr)
+
+    print(f"Episode {episode+1}: Reward={total_reward}, Recall={recall:.2f}, F1={f1:.2f}, Acc={accuracy:.2f}, FRR={frr:.2f}")
+
+
+# ===============================================
+# Validation 
+# ===============================================
+def evaluate_env(env_eval, policy_net):
+    obs, _ = env_eval.reset()
+    done = False
+    labels, preds = [], []
+
+    while not done:
+        with torch.no_grad():
+            a = policy_net(torch.tensor(obs, dtype=torch.float32)).argmax().item()
+
+        obs, _, done, _, info = env_eval.step(a)
+        labels.append(info["label"])
+        preds.append(info["action"])
+
+    return recall_score(labels, preds, zero_division=0)
+
+val_recall = evaluate_env(env_val, policy_net)
+print(f"\n Recall de validação = {val_recall:.4f}")
+
+
+# ===============================================
+# Save models
+# ===============================================
+torch.save(policy_net.state_dict(), "rl_results/dqn_policy_model.pt")
+torch.save(target_net.state_dict(), "rl_results/dqn_target_model.pt")
+
+# ===============================================
+# Plots
+# ===============================================
+metrics = {
+    "Reward": all_rewards,
+    "Recall": all_recalls,
+    "F1 Score": all_f1s,
+    "Accuracy": all_accuracies,
+    "FRR": all_frrs
+}
+
+for name, values in metrics.items():
+    plt.figure()
+    plt.plot(values, label=name)
+    plt.grid(True)
+    plt.title(f"{name} over Episodes")
+    plt.xlabel("Episode")
+    plt.ylabel(name)
+    plt.legend()
+    plt.savefig(f"rl_results/{name.lower()}_plot.png")
+    plt.close()
+
+print("Finished Train. Model Saved.")
+
+
+# ===============================================
+# FINAL test
+# ===============================================
+test_recall = evaluate_env(env_test, policy_net)
+print(f"\n FINAL Recall  test.csv = {test_recall:.4f}")
